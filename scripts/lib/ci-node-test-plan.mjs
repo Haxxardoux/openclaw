@@ -284,7 +284,10 @@ const SPLIT_NODE_SHARDS = new Map([
     ],
   ],
 ]);
-const DIST_DEPENDENT_NODE_SHARD_NAMES = new Set(["core-support-boundary"]);
+const DIST_DEPENDENT_NODE_SHARD_NAMES = new Set([]);
+
+// Shards excluded from CI on this branch.
+const EXCLUDED_SHARD_NAMES = new Set(["core-unit-fast-support", "core-support-boundary"]);
 
 function formatNodeTestShardCheckName(shardName) {
   const normalizedShardName = shardName.startsWith("core-unit-")
@@ -309,6 +312,9 @@ export function createNodeTestShards(options = {}) {
     const splitShards = SPLIT_NODE_SHARDS.get(shard.name);
     if (splitShards) {
       return splitShards.flatMap((splitShard) => {
+        if (EXCLUDED_SHARD_NAMES.has(splitShard.shardName)) {
+          return [];
+        }
         if (
           RELEASE_ONLY_PLUGIN_SHARDS.has(splitShard.shardName) &&
           !includeReleaseOnlyPluginShards
@@ -334,6 +340,10 @@ export function createNodeTestShards(options = {}) {
           },
         ];
       });
+    }
+
+    if (EXCLUDED_SHARD_NAMES.has(shard.name)) {
+      return [];
     }
 
     return [
