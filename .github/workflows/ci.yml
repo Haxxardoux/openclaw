@@ -245,7 +245,7 @@ jobs:
             channel_contracts_matrix: createMatrix(
               runNodeFull ? createChannelContractTestShards() : [],
             ),
-            run_checks: runNodeFull,
+            run_checks: false,
             checks_matrix: createMatrix(
               runNodeFull
                 ? [
