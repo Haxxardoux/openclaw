@@ -126,6 +126,53 @@ describe("railway bootstrap config", () => {
     );
   });
 
+  it("recovers template structure when existing config was hollowed out by auth command", async () => {
+    const root = await createTempDirAsync("openclaw-railway-bootstrap-");
+    const stateDir = path.join(root, "state");
+    const configPath = path.join(stateDir, "openclaw.json");
+
+    // Simulate the minimal config that the auth command writes (no agents.list)
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(
+      configPath,
+      `${JSON.stringify({
+        agents: {
+          defaults: {
+            models: { "openai-codex/gpt-5.5": {} },
+            model: { primary: "openai-codex/gpt-5.5" },
+          },
+        },
+        auth: {
+          profiles: {
+            "openai-codex:user@example.com": { provider: "openai-codex", mode: "oauth" },
+          },
+        },
+        channels: { discord: { enabled: true } },
+      })}\n`,
+      "utf8",
+    );
+
+    seedRailwayBootstrapFiles({
+      templateConfig: createBaseConfig(),
+      env: {
+        OPENCLAW_STATE_DIR: stateDir,
+        OPENCLAW_CONFIG_PATH: configPath,
+        OPENCLAW_DISCORD_GUILD_ID: "guild-123",
+      },
+      personaTemplateText: "# Recovered Persona\n",
+    });
+
+    const writtenConfig = JSON.parse(await fs.readFile(configPath, "utf8"));
+    // Template structure restored
+    expect(writtenConfig.agents.list.some((a: { id?: string }) => a.id === "discord-jester")).toBe(true);
+    // Guild config injected
+    expect(writtenConfig.channels.discord.guilds?.["guild-123"]?.requireMention).toBe(true);
+    // Auth credentials preserved
+    expect(writtenConfig.auth?.profiles?.["openai-codex:user@example.com"]?.provider).toBe("openai-codex");
+    // Auth model tokens preserved
+    expect(writtenConfig.agents.defaults.models?.["openai-codex/gpt-5.5"]).toBeDefined();
+  });
+
   it("seeds managed Discord check-in cron jobs when configured", async () => {
     const root = await createTempDirAsync("openclaw-railway-bootstrap-");
     const stateDir = path.join(root, "state");
@@ -180,6 +227,55 @@ describe("railway bootstrap config", () => {
     ]);
   });
 
+  it("seeds check-in jobs without a pinned channel when CHECKIN_CHANNEL_ID is 'last'", async () => {
+    const root = await createTempDirAsync("openclaw-railway-bootstrap-");
+    const stateDir = path.join(root, "state");
+    const configPath = path.join(stateDir, "openclaw.json");
+    const cronStorePath = path.join(stateDir, "cron", "jobs.json");
+
+    const result = seedRailwayBootstrapFiles({
+      baseConfig: createBaseConfig(),
+      env: {
+        OPENCLAW_STATE_DIR: stateDir,
+        OPENCLAW_CONFIG_PATH: configPath,
+        OPENCLAW_DISCORD_GUILD_ID: "guild-123",
+        OPENCLAW_DISCORD_CHECKIN_CHANNEL_ID: "last",
+        OPENCLAW_DISCORD_CHECKIN_TIMES: "09:00,21:00",
+        OPENCLAW_DISCORD_CHECKIN_TIMEZONE: "UTC",
+      },
+      personaTemplateText: "# Last Channel Goblin\n",
+    });
+
+    expect(result.wroteCronStore).toBe(true);
+    const cronStore = JSON.parse(await fs.readFile(cronStorePath, "utf8"));
+    expect(cronStore.jobs).toHaveLength(2);
+    for (const job of cronStore.jobs) {
+      expect(job.delivery.channel).toBe("discord");
+      expect(job.delivery.to).toBeUndefined();
+    }
+  });
+
+  it("propagates wildcard guild from template into bootstrapped config", () => {
+    const baseConfig = {
+      ...createBaseConfig(),
+      channels: {
+        discord: {
+          guilds: { "*": { requireMention: false } },
+        },
+      },
+    };
+    const config = buildRailwayBootstrapConfig({
+      baseConfig,
+      env: {
+        OPENCLAW_DISCORD_GUILD_ID: "guild-456",
+      },
+    });
+    expect(config.channels?.discord?.guilds).toMatchObject({
+      "*": { requireMention: false },
+      "guild-456": { requireMention: true },
+    });
+  });
+
   it("seeds config and persona files when they are missing", async () => {
     const root = await createTempDirAsync("openclaw-railway-bootstrap-");
     const stateDir = path.join(root, "state");
@@ -229,7 +325,7 @@ describe("railway bootstrap config", () => {
     await fs.writeFile(agentsPath, "# Existing Persona\n", "utf8");
 
     const result = seedRailwayBootstrapFiles({
-      baseConfig: createBaseConfig(workspacePath),
+      templateConfig: createBaseConfig(workspacePath),
       env: {
         OPENCLAW_STATE_DIR: stateDir,
         OPENCLAW_CONFIG_PATH: configPath,
@@ -239,7 +335,7 @@ describe("railway bootstrap config", () => {
 
     expect(result.wroteConfig).toBe(false);
     expect(result.wrotePersona).toBe(false);
-    expect(await fs.readFile(configPath, "utf8")).toContain(workspacePath);
+    expect(await fs.readFile(configPath, "utf8")).toContain("discord-jester");
     expect(await fs.readFile(agentsPath, "utf8")).toBe("# Existing Persona\n");
   });
 });

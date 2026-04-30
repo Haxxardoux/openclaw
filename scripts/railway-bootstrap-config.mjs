@@ -130,10 +130,12 @@ function parseCheckinTimes(value) {
 
 function buildDiscordCheckinSpec(params = {}) {
   const env = params.env ?? process.env;
-  const channelId = normalizeOptionalString(env.OPENCLAW_DISCORD_CHECKIN_CHANNEL_ID);
-  if (!channelId) {
+  const rawChannelId = normalizeOptionalString(env.OPENCLAW_DISCORD_CHECKIN_CHANNEL_ID);
+  if (!rawChannelId) {
     return null;
   }
+  // "last" means post to whichever Discord channel the bot was most recently active in.
+  const channelId = rawChannelId === "last" ? null : rawChannelId;
   const timezone =
     normalizeOptionalString(env.OPENCLAW_DISCORD_CHECKIN_TIMEZONE) ??
     normalizeOptionalString(env.TZ) ??
@@ -184,7 +186,7 @@ function buildDiscordCheckinJobs(params = {}) {
       delivery: {
         mode: "announce",
         channel: "discord",
-        to: `channel:${spec.channelId}`,
+        ...(spec.channelId ? { to: `channel:${spec.channelId}` } : {}),
         ...(spec.accountId ? { accountId: spec.accountId } : {}),
       },
       state: {},
@@ -224,6 +226,31 @@ function resolveCronStorePath(config, stateDir) {
   return configuredPath || join(stateDir, "cron", "jobs.json");
 }
 
+// When the auth command writes a minimal config (no agents.list), rebuild from
+// the template so structural sections aren't lost, but carry over auth credentials.
+function resolveBootstrapBase(existingConfig, templateConfig) {
+  if (!existingConfig) {
+    return templateConfig;
+  }
+  if (ensureArray(existingConfig?.agents?.list).length > 0) {
+    return existingConfig;
+  }
+  const base = cloneJson(templateConfig);
+  if (existingConfig.auth) {
+    base.auth = existingConfig.auth;
+  }
+  const existingModels = existingConfig?.agents?.defaults?.models;
+  if (existingModels && typeof existingModels === "object" && !Array.isArray(existingModels)) {
+    base.agents = ensureObject(base.agents);
+    base.agents.defaults = ensureObject(base.agents.defaults);
+    base.agents.defaults.models = {
+      ...existingModels,
+      ...ensureObject(base.agents.defaults.models),
+    };
+  }
+  return base;
+}
+
 export function buildRailwayBootstrapConfig(params = {}) {
   const env = params.env ?? process.env;
   const templateConfig = cloneJson(
@@ -237,7 +264,7 @@ export function buildRailwayBootstrapConfig(params = {}) {
   const allowedChannelIds = [
     ...new Set([
       ...parseCsvEnv(env.OPENCLAW_DISCORD_CHANNEL_IDS),
-      ...(checkinSpec ? [checkinSpec.channelId] : []),
+      ...(checkinSpec?.channelId ? [checkinSpec.channelId] : []),
     ]),
   ];
   const requireMention = parseBooleanEnv(env.OPENCLAW_DISCORD_REQUIRE_MENTION, true);
@@ -342,7 +369,7 @@ export function seedRailwayBootstrapFiles(params = {}) {
   const existingConfig = existsSync(configPath) ? readJsonFile(configPath) : null;
   const nextConfig = buildRailwayBootstrapConfig({
     env,
-    baseConfig: params.baseConfig ?? existingConfig ?? templateConfig,
+    baseConfig: params.baseConfig ?? resolveBootstrapBase(existingConfig, templateConfig),
     templateConfig,
   });
 

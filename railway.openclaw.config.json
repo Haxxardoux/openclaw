@@ -54,5 +54,23 @@
         }
       }
     ]
+  },
+  "channels": {
+    "discord": {
+      "guilds": {
+        "*": { "requireMention": true }
+      }
+    },
+    "qqbot": { "enabled": false },
+    "matrix": { "enabled": false },
+    "slack": { "enabled": false }
+  },
+  "plugins": {
+    "entries": {
+      "qqbot": { "enabled": false },
+      "qwen": { "enabled": false },
+      "matrix": { "enabled": false },
+      "slack": { "enabled": false }
+    }
   }
 }

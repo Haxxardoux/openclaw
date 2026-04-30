@@ -1735,8 +1735,10 @@
       "mirroredRootRuntimeDependencies": [
         "@agentclientprotocol/sdk",
         "@lydell/node-pty",
+        "@mariozechner/pi-coding-agent",
         "croner",
         "dotenv",
+        "global-agent",
         "jiti",
         "json5",
         "jszip",

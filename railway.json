@@ -9,7 +9,7 @@
     }
   },
   "deploy": {
-    "startCommand": "node scripts/railway-bootstrap-config.mjs && node dist/index.js gateway --allow-unconfigured --bind lan --port $PORT",
+    "startCommand": "node scripts/railway-bootstrap-config.mjs && node openclaw.mjs gateway --allow-unconfigured --bind lan --port $PORT",
     "healthcheckPath": "/healthz",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
