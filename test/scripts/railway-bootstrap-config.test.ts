@@ -2,7 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  bootstrapRailwayManagedInstalls,
   buildRailwayBootstrapConfig,
+  resolveMainWorkspacePath,
   resolveDiscordWorkspacePath,
   seedRailwayBootstrapFiles,
 } from "../../scripts/railway-bootstrap-config.mjs";
@@ -36,10 +38,38 @@ function createBaseConfig(discordWorkspace = "/data/workspaces/discord-jester") 
   };
 }
 
+function createTemplateConfigWithSecondaryGuild(
+  discordWorkspace = "/data/workspaces/discord-jester",
+  secondaryGuildId = "764311192122294314",
+) {
+  return {
+    ...createBaseConfig(discordWorkspace),
+    bindings: [
+      {
+        agentId: "discord-jester",
+        match: {
+          channel: "discord",
+          guildId: secondaryGuildId,
+        },
+      },
+    ],
+    channels: {
+      discord: {
+        guilds: {
+          [secondaryGuildId]: {
+            requireMention: true,
+          },
+        },
+      },
+    },
+  };
+}
+
 describe("railway bootstrap config", () => {
   it("injects a locked-down Discord guild route and automatic group replies", () => {
     const config = buildRailwayBootstrapConfig({
       baseConfig: createBaseConfig(),
+      templateConfig: createBaseConfig(),
       env: {
         OPENCLAW_DISCORD_GUILD_ID: "guild-123",
         OPENCLAW_DISCORD_CHANNEL_IDS: "general,memes,general",
@@ -81,6 +111,219 @@ describe("railway bootstrap config", () => {
       },
     });
     expect(config.agents.list[1]?.name).toBe("Bog Emperor");
+    expect(config.agents.list[0]?.tools).toEqual({
+      alsoAllow: ["lobster"],
+    });
+  });
+
+  it("enables the Mem0 plugin config when MEM0_API_KEY is present", () => {
+    const config = buildRailwayBootstrapConfig({
+      baseConfig: createBaseConfig(),
+      templateConfig: createBaseConfig(),
+      env: {
+        MEM0_API_KEY: "m0-test",
+      },
+    });
+
+    expect(config.plugins?.entries?.["openclaw-mem0"]).toEqual({
+      enabled: true,
+      config: {
+        mode: "platform",
+        apiKey: "${MEM0_API_KEY}",
+        userId: "default",
+        autoCapture: true,
+        autoRecall: true,
+      },
+    });
+  });
+
+  it("switches the inherited default model profile without changing fallback shape", () => {
+    const config = buildRailwayBootstrapConfig({
+      baseConfig: {
+        ...createBaseConfig(),
+        agents: {
+          defaults: {
+            model: {
+              primary: "openai-codex/gpt-5.4",
+              fallbacks: ["openrouter/openai/gpt-4.1", "openrouter/google/gemini-2.5-flash"],
+            },
+          },
+          list: createBaseConfig().agents.list,
+        },
+      },
+      templateConfig: createBaseConfig(),
+      env: {
+        OPENCLAW_DEFAULT_MODEL_PROFILE: "codex-plan",
+      },
+    });
+
+    expect(config.agents.defaults.model).toEqual({
+      primary: "openai-codex/gpt-5.4",
+      fallbacks: ["openrouter/openai/gpt-4.1", "openrouter/google/gemini-2.5-flash"],
+    });
+  });
+
+  it("preserves an existing default model when no Railway model switch env is set", () => {
+    const config = buildRailwayBootstrapConfig({
+      baseConfig: {
+        ...createBaseConfig(),
+        agents: {
+          defaults: {
+            model: {
+              primary: "openai-codex/gpt-5.4",
+              fallbacks: ["openrouter/openai/gpt-4.1"],
+            },
+          },
+          list: createBaseConfig().agents.list,
+        },
+      },
+      templateConfig: createBaseConfig(),
+      env: {},
+    });
+
+    expect(config.agents.defaults.model).toEqual({
+      primary: "openai-codex/gpt-5.4",
+      fallbacks: ["openrouter/openai/gpt-4.1"],
+    });
+  });
+
+  it("accepts an explicit default primary override for Railway config switching", () => {
+    const config = buildRailwayBootstrapConfig({
+      baseConfig: {
+        ...createBaseConfig(),
+        agents: {
+          defaults: {
+            model: {
+              primary: "openai-codex/gpt-5.4",
+              fallbacks: ["openrouter/openai/gpt-4.1"],
+            },
+          },
+          list: createBaseConfig().agents.list,
+        },
+      },
+      templateConfig: createBaseConfig(),
+      env: {
+        OPENCLAW_DEFAULT_MODEL_PRIMARY:
+          "openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+      },
+    });
+
+    expect(config.agents.defaults.model).toEqual({
+      primary: "openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+      fallbacks: ["openrouter/openai/gpt-4.1"],
+    });
+  });
+
+  it("accepts an explicit default backup override for Railway config switching", () => {
+    const config = buildRailwayBootstrapConfig({
+      baseConfig: {
+        ...createBaseConfig(),
+        agents: {
+          defaults: {
+            model: {
+              primary: "openai-codex/gpt-5.4",
+              fallbacks: ["openrouter/openai/gpt-4.1", "openrouter/google/gemini-2.5-flash"],
+            },
+          },
+          list: createBaseConfig().agents.list,
+        },
+      },
+      templateConfig: createBaseConfig(),
+      env: {
+        OPENCLAW_DEFAULT_MODEL_BACKUP: "openrouter/meta-llama/llama-3.3-70b-instruct",
+      },
+    });
+
+    expect(config.agents.defaults.model).toEqual({
+      primary: "openai-codex/gpt-5.4",
+      fallbacks: ["openrouter/meta-llama/llama-3.3-70b-instruct"],
+    });
+  });
+
+  it("accepts an explicit fallback list override for Railway config switching", () => {
+    const config = buildRailwayBootstrapConfig({
+      baseConfig: {
+        ...createBaseConfig(),
+        agents: {
+          defaults: {
+            model: {
+              primary: "openai-codex/gpt-5.4",
+              fallbacks: ["openrouter/openai/gpt-4.1"],
+            },
+          },
+          list: createBaseConfig().agents.list,
+        },
+      },
+      templateConfig: createBaseConfig(),
+      env: {
+        OPENCLAW_DEFAULT_MODEL_FALLBACKS:
+          "openrouter/openai/gpt-4.1,openrouter/google/gemini-2.5-flash",
+      },
+    });
+
+    expect(config.agents.defaults.model).toEqual({
+      primary: "openai-codex/gpt-5.4",
+      fallbacks: ["openrouter/openai/gpt-4.1", "openrouter/google/gemini-2.5-flash"],
+    });
+  });
+
+  it("accepts an explicit default heartbeat model override for Railway config switching", () => {
+    const config = buildRailwayBootstrapConfig({
+      baseConfig: {
+        ...createBaseConfig(),
+        agents: {
+          defaults: {
+            heartbeat: {
+              model: "openrouter/google/gemini-2.5-flash",
+              lightContext: true,
+              isolatedSession: true,
+            },
+          },
+          list: createBaseConfig().agents.list,
+        },
+      },
+      templateConfig: createBaseConfig(),
+      env: {
+        OPENCLAW_DEFAULT_HEARTBEAT_MODEL: "openrouter/openai/gpt-4.1",
+      },
+    });
+
+    expect(config.agents.defaults.heartbeat).toEqual({
+      model: "openrouter/openai/gpt-4.1",
+      lightContext: true,
+      isolatedSession: true,
+    });
+  });
+
+  it("merges template-declared secondary Discord guild routes into the bootstrapped config", () => {
+    const config = buildRailwayBootstrapConfig({
+      baseConfig: createBaseConfig(),
+      templateConfig: createTemplateConfigWithSecondaryGuild(),
+      env: {
+        OPENCLAW_DISCORD_GUILD_ID: "guild-123",
+      },
+    });
+
+    expect(config.bindings).toEqual([
+      {
+        agentId: "discord-jester",
+        match: {
+          channel: "discord",
+          guildId: "764311192122294314",
+        },
+      },
+      {
+        agentId: "discord-jester",
+        match: {
+          channel: "discord",
+          guildId: "guild-123",
+        },
+      },
+    ]);
+    expect(config.channels?.discord?.guilds).toMatchObject({
+      "764311192122294314": { requireMention: true },
+      "guild-123": { requireMention: true },
+    });
   });
 
   it("repairs an existing config when Discord env vars are added later", async () => {
@@ -101,12 +344,13 @@ describe("railway bootstrap config", () => {
     );
 
     const result = seedRailwayBootstrapFiles({
-      templateConfig: createBaseConfig(workspacePath),
+      templateConfig: createTemplateConfigWithSecondaryGuild(workspacePath),
       env: {
         OPENCLAW_STATE_DIR: stateDir,
         OPENCLAW_CONFIG_PATH: configPath,
         OPENCLAW_DISCORD_GUILD_ID: "guild-123",
         OPENCLAW_DISCORD_CHANNEL_IDS: "general",
+        OPENCLAW_RAILWAY_BOOTSTRAP_INSTALLS: "false",
       },
       personaTemplateText: "# Repaired Persona\n",
     });
@@ -115,6 +359,25 @@ describe("railway bootstrap config", () => {
     expect(result.wrotePersona).toBe(true);
 
     const writtenConfig = JSON.parse(await fs.readFile(configPath, "utf8"));
+    expect(writtenConfig.bindings).toEqual([
+      {
+        agentId: "discord-jester",
+        match: {
+          channel: "discord",
+          guildId: "764311192122294314",
+        },
+      },
+      {
+        agentId: "discord-jester",
+        match: {
+          channel: "discord",
+          guildId: "guild-123",
+        },
+      },
+    ]);
+    expect(writtenConfig.channels.discord.guilds["764311192122294314"]).toEqual({
+      requireMention: true,
+    });
     expect(writtenConfig.channels.discord.guilds["guild-123"]).toEqual({
       requireMention: true,
       channels: {
@@ -158,6 +421,7 @@ describe("railway bootstrap config", () => {
         OPENCLAW_STATE_DIR: stateDir,
         OPENCLAW_CONFIG_PATH: configPath,
         OPENCLAW_DISCORD_GUILD_ID: "guild-123",
+        OPENCLAW_RAILWAY_BOOTSTRAP_INSTALLS: "false",
       },
       personaTemplateText: "# Recovered Persona\n",
     });
@@ -188,6 +452,7 @@ describe("railway bootstrap config", () => {
         OPENCLAW_DISCORD_CHECKIN_CHANNEL_ID: "banter-hall",
         OPENCLAW_DISCORD_CHECKIN_TIMES: "09:30,13:00,18:45",
         OPENCLAW_DISCORD_CHECKIN_TIMEZONE: "America/New_York",
+        OPENCLAW_RAILWAY_BOOTSTRAP_INSTALLS: "false",
       },
       personaTemplateText: "# Cron Goblin\n",
     });
@@ -242,6 +507,7 @@ describe("railway bootstrap config", () => {
         OPENCLAW_DISCORD_CHECKIN_CHANNEL_ID: "last",
         OPENCLAW_DISCORD_CHECKIN_TIMES: "09:00,21:00",
         OPENCLAW_DISCORD_CHECKIN_TIMEZONE: "UTC",
+        OPENCLAW_RAILWAY_BOOTSTRAP_INSTALLS: "false",
       },
       personaTemplateText: "# Last Channel Goblin\n",
     });
@@ -290,6 +556,7 @@ describe("railway bootstrap config", () => {
         OPENCLAW_STATE_DIR: stateDir,
         OPENCLAW_CONFIG_PATH: configPath,
         OPENCLAW_DISCORD_GUILD_ID: "guild-123",
+        OPENCLAW_RAILWAY_BOOTSTRAP_INSTALLS: "false",
       },
       personaTemplateText: personaText,
     });
@@ -300,6 +567,7 @@ describe("railway bootstrap config", () => {
 
     const writtenConfig = JSON.parse(await fs.readFile(configPath, "utf8"));
     expect(resolveDiscordWorkspacePath(writtenConfig)).toBe(workspacePath);
+    expect(resolveMainWorkspacePath(writtenConfig)).toBe("/data/workspace");
     expect(writtenConfig.channels.discord.guilds["guild-123"].requireMention).toBe(true);
     expect(await fs.readFile(agentsPath, "utf8")).toBe(personaText);
   });
@@ -329,6 +597,7 @@ describe("railway bootstrap config", () => {
       env: {
         OPENCLAW_STATE_DIR: stateDir,
         OPENCLAW_CONFIG_PATH: configPath,
+        OPENCLAW_RAILWAY_BOOTSTRAP_INSTALLS: "false",
       },
       personaTemplateText: "# New Persona\n",
     });
@@ -337,5 +606,93 @@ describe("railway bootstrap config", () => {
     expect(result.wrotePersona).toBe(false);
     expect(await fs.readFile(configPath, "utf8")).toContain("discord-jester");
     expect(await fs.readFile(agentsPath, "utf8")).toBe("# Existing Persona\n");
+  });
+
+  it("installs missing Railway plugins and workspace skills exactly once", async () => {
+    const root = await createTempDirAsync("openclaw-railway-bootstrap-");
+    const workspacePath = path.join(root, "workspace");
+    const calls: Array<{ args: string[]; cwd: string }> = [];
+
+    const result = bootstrapRailwayManagedInstalls({
+      config: {
+        agents: {
+          list: [{ id: "main", default: true, workspace: workspacePath }],
+        },
+      },
+      mainWorkspacePath: workspacePath,
+      runner: ({ args, cwd }: { args: string[]; cwd: string }) => {
+        calls.push({ args, cwd });
+        if (args.join(" ") === "plugins list --json") {
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              plugins: [{ id: "claw-messenger" }],
+            }),
+            stderr: "",
+          };
+        }
+        return {
+          status: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    });
+
+    expect(result.installedPlugins).toEqual(["openclaw-mem0", "lobster"]);
+    expect(result.installedSkills).toEqual(["gog", "web-search", "github", "weather"]);
+    expect(calls.map((call) => call.args)).toEqual([
+      ["plugins", "list", "--json"],
+      ["plugins", "install", "clawhub:@mem0/openclaw-mem0"],
+      ["plugins", "install", "clawhub:@openclaw/lobster"],
+      ["skills", "install", "gog"],
+      ["skills", "install", "web-search"],
+      ["skills", "install", "github"],
+      ["skills", "install", "weather"],
+    ]);
+    expect(calls[0]?.cwd.endsWith("openclaw")).toBe(true);
+    expect(calls[1]?.cwd.endsWith("openclaw")).toBe(true);
+    expect(calls[2]?.cwd.endsWith("openclaw")).toBe(true);
+    expect(calls[3]?.cwd).toBe(workspacePath);
+  });
+
+  it("skips plugin and skill installs that already exist", async () => {
+    const root = await createTempDirAsync("openclaw-railway-bootstrap-");
+    const workspacePath = path.join(root, "workspace");
+    await fs.mkdir(path.join(workspacePath, "skills", "gog"), { recursive: true });
+    await fs.writeFile(path.join(workspacePath, "skills", "gog", "SKILL.md"), "# gog\n", "utf8");
+    const calls: Array<{ args: string[]; cwd: string }> = [];
+
+    const result = bootstrapRailwayManagedInstalls({
+      config: {
+        agents: {
+          list: [{ id: "main", default: true, workspace: workspacePath }],
+        },
+      },
+      mainWorkspacePath: workspacePath,
+      runner: ({ args, cwd }: { args: string[]; cwd: string }) => {
+        calls.push({ args, cwd });
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            plugins: [
+              { id: "claw-messenger" },
+              { id: "openclaw-mem0" },
+              { id: "lobster" },
+            ],
+          }),
+          stderr: "",
+        };
+      },
+    });
+
+    expect(result.installedPlugins).toEqual([]);
+    expect(result.installedSkills).toEqual(["web-search", "github", "weather"]);
+    expect(calls.map((call) => call.args)).toEqual([
+      ["plugins", "list", "--json"],
+      ["skills", "install", "web-search"],
+      ["skills", "install", "github"],
+      ["skills", "install", "weather"],
+    ]);
   });
 });

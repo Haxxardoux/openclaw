@@ -1,3 +1,4 @@
+import { normalizeProviderId } from "../agents/provider-id.js";
 import { withActivatedPluginIds } from "./activation-context.js";
 import { resolveBundledPluginCompatibleActivationInputs } from "./activation-context.js";
 import { resolveManifestActivationPluginIds } from "./activation-planner.js";
@@ -28,6 +29,19 @@ import type { ProviderPlugin } from "./types.js";
 
 function dedupeSortedPluginIds(values: Iterable<string>): string[] {
   return [...new Set(values)].toSorted((left, right) => left.localeCompare(right));
+}
+
+function matchesProviderPluginRef(provider: ProviderPlugin, providerId: string): boolean {
+  const normalized = normalizeProviderId(providerId);
+  if (!normalized) {
+    return false;
+  }
+  if (normalizeProviderId(provider.id) === normalized) {
+    return true;
+  }
+  return [...(provider.aliases ?? []), ...(provider.hookAliases ?? [])].some(
+    (alias) => normalizeProviderId(alias) === normalized,
+  );
 }
 
 function resolveExplicitProviderOwnerPluginIds(params: {
@@ -267,6 +281,33 @@ function resolveRuntimeProviderPluginLoadState(
   return { loadOptions };
 }
 
+function resolveActiveRuntimeProviders(params: {
+  onlyPluginIds?: readonly string[];
+  providerRefs?: readonly string[];
+}): ProviderPlugin[] | undefined {
+  if (!params.providerRefs?.length || !params.onlyPluginIds || params.onlyPluginIds.length === 0) {
+    return undefined;
+  }
+  const activeRegistry = resolveRuntimePluginRegistry();
+  if (!activeRegistry) {
+    return undefined;
+  }
+  const allowedPluginIds = new Set(params.onlyPluginIds);
+  const activeEntries = activeRegistry.providers.filter((entry) => allowedPluginIds.has(entry.pluginId));
+  if (activeEntries.length === 0) {
+    return undefined;
+  }
+  if (
+    params.providerRefs?.length &&
+    !activeEntries.some((entry) =>
+      params.providerRefs?.some((providerRef) => matchesProviderPluginRef(entry.provider, providerRef)),
+    )
+  ) {
+    return undefined;
+  }
+  return activeEntries.map((entry) => Object.assign({}, entry.provider, { pluginId: entry.pluginId }));
+}
+
 export function isPluginProvidersLoadInFlight(
   params: Parameters<typeof resolvePluginProviders>[0],
 ): boolean {
@@ -311,6 +352,13 @@ export function resolvePluginProviders(params: {
     );
   }
   const loadState = resolveRuntimeProviderPluginLoadState(params, base);
+  const activeProviders = resolveActiveRuntimeProviders({
+    onlyPluginIds: loadState.loadOptions.onlyPluginIds,
+    providerRefs: params.providerRefs,
+  });
+  if (activeProviders) {
+    return activeProviders;
+  }
   const registry = resolveRuntimePluginRegistry(loadState.loadOptions);
   if (!registry) {
     return [];

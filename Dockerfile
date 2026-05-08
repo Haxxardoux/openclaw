@@ -166,7 +166,7 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
     --mount=type=cache,id=openclaw-bookworm-apt-lists,target=/var/lib/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      bubblewrap ca-certificates procps hostname curl git lsof openssl && \
+      bubblewrap ca-certificates procps hostname curl git gh lsof openssl && \
     update-ca-certificates
 
 RUN chown node:node /app
@@ -200,6 +200,20 @@ RUN install -d -m 0755 "$COREPACK_HOME" && \
       sleep $((attempt * 2)); \
     done && \
     chmod -R a+rX "$COREPACK_HOME"
+
+# Bake in external CLIs required by the Railway bootstrap skills.
+ARG OPENCLAW_INSTALL_GOG="1"
+RUN if [ -n "$OPENCLAW_INSTALL_GOG" ]; then \
+      set -eux; \
+      case "$(dpkg --print-architecture)" in \
+        amd64) gog_arch=amd64 ;; \
+        arm64) gog_arch=arm64 ;; \
+        *) echo "Unsupported architecture for gog: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+      esac; \
+      curl -fsSL "https://github.com/openclaw/gogcli/releases/latest/download/gogcli_linux_${gog_arch}.tar.gz" \
+        | tar -xz -C /usr/local/bin gog && \
+      chmod 755 /usr/local/bin/gog; \
+    fi
 
 # Install additional system packages needed by your skills or extensions.
 # Example: docker build --build-arg OPENCLAW_DOCKER_APT_PACKAGES="python3 wget" .

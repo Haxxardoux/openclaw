@@ -19,6 +19,7 @@ import type {
 type ResolvePluginProviders = typeof import("./providers.runtime.js").resolvePluginProviders;
 type IsPluginProvidersLoadInFlight =
   typeof import("./providers.runtime.js").isPluginProvidersLoadInFlight;
+type ResolveRuntimePluginRegistry = typeof import("./loader.js").resolveRuntimePluginRegistry;
 type ResolveCatalogHookProviderPluginIds =
   typeof import("./providers.js").resolveCatalogHookProviderPluginIds;
 type ResolveExternalAuthProfileCompatFallbackPluginIds =
@@ -32,6 +33,7 @@ type ResolveBundledProviderPolicySurface =
 
 const resolvePluginProvidersMock = vi.fn<ResolvePluginProviders>((_) => [] as ProviderPlugin[]);
 const isPluginProvidersLoadInFlightMock = vi.fn<IsPluginProvidersLoadInFlight>((_) => false);
+const resolveRuntimePluginRegistryMock = vi.fn<ResolveRuntimePluginRegistry>((_) => undefined);
 const resolveCatalogHookProviderPluginIdsMock = vi.fn<ResolveCatalogHookProviderPluginIds>(
   (_) => [] as string[],
 );
@@ -259,6 +261,14 @@ describe("provider-runtime", () => {
       isPluginProvidersLoadInFlight: (params: unknown) =>
         isPluginProvidersLoadInFlightMock(params as never),
     }));
+    vi.doMock("./loader.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("./loader.js")>();
+      return {
+        ...actual,
+        resolveRuntimePluginRegistry: (params: unknown) =>
+          resolveRuntimePluginRegistryMock(params as never),
+      };
+    });
     vi.doMock("../logging/subsystem.js", () => ({
       createSubsystemLogger: () => ({
         debug: vi.fn(),
@@ -323,6 +333,8 @@ describe("provider-runtime", () => {
     resolvePluginProvidersMock.mockReturnValue([]);
     isPluginProvidersLoadInFlightMock.mockReset();
     isPluginProvidersLoadInFlightMock.mockReturnValue(false);
+    resolveRuntimePluginRegistryMock.mockReset();
+    resolveRuntimePluginRegistryMock.mockReturnValue(undefined);
     resolveCatalogHookProviderPluginIdsMock.mockReset();
     resolveCatalogHookProviderPluginIdsMock.mockReturnValue([]);
     resolveExternalAuthProfileCompatFallbackPluginIdsMock.mockReset();
@@ -472,6 +484,24 @@ describe("provider-runtime", () => {
       }),
     ).toBeUndefined();
     expect(resolvePluginProvidersMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("reuses the active runtime registry for provider hook lookup before loading providers again", () => {
+    const runtimeProvider: ProviderPlugin = {
+      id: "openai-codex",
+      label: "OpenAI Codex",
+      auth: [],
+      aliases: ["openai-codex"],
+    };
+    resolveRuntimePluginRegistryMock.mockReturnValue({
+      providers: [{ pluginId: "openai", provider: runtimeProvider }],
+    } as never);
+
+    expect(resolveProviderRuntimePlugin({ provider: "openai-codex" })).toMatchObject({
+      id: "openai-codex",
+      pluginId: "openai",
+    });
+    expect(resolvePluginProvidersMock).not.toHaveBeenCalled();
   });
 
   it("skips provider runtime loading when no plugin declares external auth hooks", () => {

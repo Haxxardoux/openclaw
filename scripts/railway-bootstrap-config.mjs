@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,17 @@ const DEFAULT_PERSONA_TEMPLATE_PATH = join(
 );
 const DEFAULT_DISCORD_AGENT_ID = "discord-jester";
 const DEFAULT_DISCORD_AGENT_NAME = "Grumbleghast";
+const DEFAULT_MAIN_AGENT_ID = "main";
+const DEFAULT_MODEL_PROFILE_PRIMARY_MAP = Object.freeze({
+  "codex-plan": "openai-codex/gpt-5.4",
+  "openrouter-free": "openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+});
+const DEFAULT_RAILWAY_PLUGIN_INSTALLS = Object.freeze([
+  { id: "claw-messenger", spec: "@emotion-machine/claw-messenger" },
+  { id: "openclaw-mem0", spec: "clawhub:@mem0/openclaw-mem0" },
+  { id: "lobster", spec: "clawhub:@openclaw/lobster" },
+]);
+const DEFAULT_RAILWAY_SKILLS = Object.freeze(["gog", "web-search", "github", "weather"]);
 const DEFAULT_CHECKIN_TIMEZONE = "UTC";
 const DEFAULT_CHECKIN_TIMES = ["09:15", "13:15", "18:15", "22:15"];
 const DEFAULT_CHECKIN_PROMPT = [
@@ -68,6 +80,36 @@ function normalizeOptionalString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function updateModelPrimary(modelConfig, primary) {
+  if (!primary) {
+    return modelConfig;
+  }
+  if (modelConfig && typeof modelConfig === "object" && !Array.isArray(modelConfig)) {
+    return {
+      ...modelConfig,
+      primary,
+    };
+  }
+  return {
+    primary,
+  };
+}
+
+function updateModelFallbacks(modelConfig, fallbacks) {
+  if (!Array.isArray(fallbacks) || fallbacks.length === 0) {
+    return modelConfig;
+  }
+  if (modelConfig && typeof modelConfig === "object" && !Array.isArray(modelConfig)) {
+    return {
+      ...modelConfig,
+      fallbacks,
+    };
+  }
+  return {
+    fallbacks,
+  };
+}
+
 function readJsonFile(filePath) {
   return JSON.parse(readFileSync(filePath, "utf8"));
 }
@@ -89,6 +131,58 @@ function findAgent(config, agentId = DEFAULT_DISCORD_AGENT_ID) {
   return ensureArray(config?.agents?.list).find((entry) => entry?.id === agentId) ?? null;
 }
 
+function ensureStringArray(value) {
+  return Array.isArray(value) ? value.filter((entry) => typeof entry === "string" && entry.trim()) : [];
+}
+
+function resolveDefaultModelProfile(env = process.env) {
+  const rawProfile = normalizeOptionalString(env.OPENCLAW_DEFAULT_MODEL_PROFILE);
+  if (!rawProfile) {
+    return null;
+  }
+  const normalized = rawProfile.toLowerCase();
+  return DEFAULT_MODEL_PROFILE_PRIMARY_MAP[normalized] ? normalized : null;
+}
+
+function resolveDefaultPrimaryModelOverride(env = process.env) {
+  const explicitPrimary = normalizeOptionalString(env.OPENCLAW_DEFAULT_MODEL_PRIMARY);
+  if (explicitPrimary) {
+    return explicitPrimary;
+  }
+  const profile = resolveDefaultModelProfile(env);
+  return profile ? (DEFAULT_MODEL_PROFILE_PRIMARY_MAP[profile] ?? null) : null;
+}
+
+function resolveDefaultFallbackModelsOverride(env = process.env) {
+  const explicitFallbacks = parseCsvEnv(env.OPENCLAW_DEFAULT_MODEL_FALLBACKS);
+  if (explicitFallbacks.length > 0) {
+    return explicitFallbacks;
+  }
+  const backup = normalizeOptionalString(env.OPENCLAW_DEFAULT_MODEL_BACKUP);
+  return backup ? [backup] : null;
+}
+
+function resolveHeartbeatModelOverride(env = process.env) {
+  return normalizeOptionalString(env.OPENCLAW_DEFAULT_HEARTBEAT_MODEL);
+}
+
+function applyDefaultModelOverrides(config, env = process.env) {
+  const nextPrimary = resolveDefaultPrimaryModelOverride(env);
+  const nextFallbacks = resolveDefaultFallbackModelsOverride(env);
+  const nextHeartbeatModel = resolveHeartbeatModelOverride(env);
+  if (!nextPrimary && !nextFallbacks && !nextHeartbeatModel) {
+    return;
+  }
+  config.agents = ensureObject(config.agents);
+  config.agents.defaults = ensureObject(config.agents.defaults);
+  config.agents.defaults.model = updateModelPrimary(config.agents.defaults.model, nextPrimary);
+  config.agents.defaults.model = updateModelFallbacks(config.agents.defaults.model, nextFallbacks);
+  if (nextHeartbeatModel) {
+    config.agents.defaults.heartbeat = ensureObject(config.agents.defaults.heartbeat);
+    config.agents.defaults.heartbeat.model = nextHeartbeatModel;
+  }
+}
+
 function ensureDiscordAgent(config, templateConfig, agentId = DEFAULT_DISCORD_AGENT_ID) {
   const existingAgent = findAgent(config, agentId);
   if (existingAgent) {
@@ -104,6 +198,82 @@ function ensureDiscordAgent(config, templateConfig, agentId = DEFAULT_DISCORD_AG
   list.push(nextAgent);
   config.agents.list = list;
   return nextAgent;
+}
+
+function resolveDiscordGuildRouteBindingKey(binding, agentId = DEFAULT_DISCORD_AGENT_ID) {
+  if (binding?.agentId !== agentId || binding?.match?.channel !== "discord") {
+    return null;
+  }
+  return normalizeOptionalString(binding?.match?.guildId);
+}
+
+function ensureTemplateDiscordBindings(config, templateConfig, agentId = DEFAULT_DISCORD_AGENT_ID) {
+  const templateBindings = ensureArray(templateConfig?.bindings);
+  if (templateBindings.length === 0) {
+    return;
+  }
+  const nextBindings = ensureArray(config.bindings);
+  const seenGuildIds = new Set(
+    nextBindings
+      .map((binding) => resolveDiscordGuildRouteBindingKey(binding, agentId))
+      .filter(Boolean),
+  );
+  for (const binding of templateBindings) {
+    const guildId = resolveDiscordGuildRouteBindingKey(binding, agentId);
+    if (!guildId || seenGuildIds.has(guildId)) {
+      continue;
+    }
+    nextBindings.push(cloneJson(binding));
+    seenGuildIds.add(guildId);
+  }
+  config.bindings = nextBindings;
+}
+
+function ensureTemplateDiscordGuilds(config, templateConfig) {
+  const templateGuilds = ensureObject(templateConfig?.channels?.discord?.guilds);
+  if (Object.keys(templateGuilds).length === 0) {
+    return;
+  }
+  config.channels = ensureObject(config.channels);
+  const existingDiscord = ensureObject(config.channels.discord);
+  const existingGuilds = ensureObject(existingDiscord.guilds);
+  config.channels.discord = {
+    ...existingDiscord,
+    guilds: {
+      ...templateGuilds,
+      ...existingGuilds,
+    },
+  };
+}
+
+function ensureMainAgentLobsterTool(config) {
+  const agent = findAgent(config, DEFAULT_MAIN_AGENT_ID);
+  if (!agent) {
+    return;
+  }
+  agent.tools = ensureObject(agent.tools);
+  const alsoAllow = new Set(ensureStringArray(agent.tools.alsoAllow));
+  alsoAllow.add("lobster");
+  agent.tools.alsoAllow = [...alsoAllow];
+}
+
+function applyMem0PluginConfig(config, env = process.env) {
+  const mem0ApiKey = normalizeOptionalString(env.MEM0_API_KEY);
+  if (!mem0ApiKey) {
+    return;
+  }
+  config.plugins = ensureObject(config.plugins);
+  config.plugins.entries = ensureObject(config.plugins.entries);
+  config.plugins.entries["openclaw-mem0"] = {
+    enabled: true,
+    config: {
+      mode: "platform",
+      apiKey: "${MEM0_API_KEY}",
+      userId: "default",
+      autoCapture: true,
+      autoRecall: true,
+    },
+  };
 }
 
 function parseCheckinTimes(value) {
@@ -274,10 +444,15 @@ export function buildRailwayBootstrapConfig(params = {}) {
   );
   const discordTokenEnv = env.OPENCLAW_DISCORD_TOKEN_ENV?.trim() || "DISCORD_BOT_TOKEN";
   const discordAgentName = env.OPENCLAW_DISCORD_AGENT_NAME?.trim() || null;
+  applyDefaultModelOverrides(nextConfig, env);
+  ensureMainAgentLobsterTool(nextConfig);
+  applyMem0PluginConfig(nextConfig, env);
 
   if (guildId) {
     ensureDiscordAgent(nextConfig, templateConfig);
   }
+  ensureTemplateDiscordBindings(nextConfig, templateConfig);
+  ensureTemplateDiscordGuilds(nextConfig, templateConfig);
 
   const agent = findAgent(nextConfig);
   if (agent && discordAgentName) {
@@ -359,6 +534,119 @@ export function resolveDiscordWorkspacePath(config, agentId = DEFAULT_DISCORD_AG
   return typeof agent?.workspace === "string" && agent.workspace.trim() ? agent.workspace : null;
 }
 
+export function resolveMainWorkspacePath(config, agentId = DEFAULT_MAIN_AGENT_ID) {
+  const agent = findAgent(config, agentId);
+  return typeof agent?.workspace === "string" && agent.workspace.trim() ? agent.workspace : null;
+}
+
+function formatCliFailure(result, args) {
+  const stderr = typeof result?.stderr === "string" ? result.stderr.trim() : "";
+  const stdout = typeof result?.stdout === "string" ? result.stdout.trim() : "";
+  const details = stderr || stdout || `exit ${result?.status ?? "unknown"}`;
+  return `openclaw ${args.join(" ")} failed: ${details}`;
+}
+
+function runOpenClawCli(args, params = {}) {
+  const env = params.env ?? process.env;
+  const cwd = params.cwd ?? REPO_ROOT;
+  const runner = params.runner;
+  if (typeof runner === "function") {
+    return runner({ args, cwd, env });
+  }
+  const result = spawnSync(process.execPath, [join(REPO_ROOT, "openclaw.mjs"), ...args], {
+    cwd,
+    env,
+    encoding: "utf8",
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  return result;
+}
+
+function parseJsonCommandOutput(result, args) {
+  const stdout = typeof result?.stdout === "string" ? result.stdout.trim() : "";
+  if (result?.status !== 0) {
+    throw new Error(formatCliFailure(result, args));
+  }
+  if (!stdout) {
+    throw new Error(`openclaw ${args.join(" ")} returned no JSON output`);
+  }
+  return JSON.parse(stdout);
+}
+
+function ensureWorkspaceDir(workspacePath) {
+  if (!workspacePath) {
+    return;
+  }
+  mkdirSync(workspacePath, { recursive: true });
+}
+
+export function bootstrapRailwayManagedInstalls(params = {}) {
+  const env = params.env ?? process.env;
+  const config = params.config ?? null;
+  const enabled = parseBooleanEnv(env.OPENCLAW_RAILWAY_BOOTSTRAP_INSTALLS, true);
+  if (!enabled) {
+    return {
+      installedPlugins: [],
+      installedSkills: [],
+      skipped: true,
+    };
+  }
+
+  const runner = params.runner;
+  const pluginListResult = runOpenClawCli(["plugins", "list", "--json"], { env, runner });
+  const pluginReport = parseJsonCommandOutput(pluginListResult, ["plugins", "list", "--json"]);
+  const installedPluginIds = new Set(
+    ensureArray(pluginReport?.plugins)
+      .map((plugin) => normalizeOptionalString(plugin?.id))
+      .filter(Boolean),
+  );
+
+  const installedPlugins = [];
+  for (const plugin of DEFAULT_RAILWAY_PLUGIN_INSTALLS) {
+    if (installedPluginIds.has(plugin.id)) {
+      continue;
+    }
+    const installArgs = ["plugins", "install", plugin.spec];
+    const result = runOpenClawCli(installArgs, { env, runner });
+    if (result?.status !== 0) {
+      throw new Error(formatCliFailure(result, installArgs));
+    }
+    installedPlugins.push(plugin.id);
+  }
+
+  const mainWorkspacePath =
+    normalizeOptionalString(params.mainWorkspacePath) ??
+    normalizeOptionalString(resolveMainWorkspacePath(config));
+  const installedSkills = [];
+  if (mainWorkspacePath) {
+    ensureWorkspaceDir(mainWorkspacePath);
+    for (const skill of DEFAULT_RAILWAY_SKILLS) {
+      const skillPath = join(mainWorkspacePath, "skills", skill, "SKILL.md");
+      if (existsSync(skillPath)) {
+        continue;
+      }
+      const installArgs = ["skills", "install", skill];
+      const result = runOpenClawCli(installArgs, {
+        cwd: mainWorkspacePath,
+        env,
+        runner,
+      });
+      if (result?.status !== 0) {
+        throw new Error(formatCliFailure(result, installArgs));
+      }
+      installedSkills.push(skill);
+    }
+  }
+
+  return {
+    installedPlugins,
+    installedSkills,
+    skipped: false,
+  };
+}
+
 export function seedRailwayBootstrapFiles(params = {}) {
   const env = params.env ?? process.env;
   const stateDir = env.OPENCLAW_STATE_DIR?.trim() || "/data/.openclaw";
@@ -381,6 +669,7 @@ export function seedRailwayBootstrapFiles(params = {}) {
 
   const activeConfig = wroteConfig ? nextConfig : (existingConfig ?? nextConfig);
   const workspacePath = resolveDiscordWorkspacePath(activeConfig);
+  const mainWorkspacePath = resolveMainWorkspacePath(activeConfig);
   const discordEnabled = activeConfig?.channels?.discord?.enabled === true && Boolean(workspacePath);
   let wrotePersona = false;
   if (workspacePath) {
@@ -390,6 +679,10 @@ export function seedRailwayBootstrapFiles(params = {}) {
       writeFileSync(agentsPath, personaTemplateText, "utf8");
       wrotePersona = true;
     }
+  }
+
+  if (mainWorkspacePath) {
+    ensureWorkspaceDir(mainWorkspacePath);
   }
 
   const cronStorePath = resolveCronStorePath(activeConfig, stateDir);
@@ -405,13 +698,24 @@ export function seedRailwayBootstrapFiles(params = {}) {
     wroteCronStore = true;
   }
 
+  const installResult = bootstrapRailwayManagedInstalls({
+    env,
+    config: activeConfig,
+    mainWorkspacePath,
+    runner: params.runner,
+  });
+
   return {
     configPath,
     cronStorePath,
     workspacePath,
+    mainWorkspacePath,
     wroteConfig,
     wroteCronStore,
     wrotePersona,
+    installedPlugins: installResult.installedPlugins,
+    installedSkills: installResult.installedSkills,
+    skippedInstalls: installResult.skipped,
   };
 }
 
@@ -429,5 +733,11 @@ if (isDirectInvocation()) {
   }
   if (result.wrotePersona && result.workspacePath) {
     console.log(`[railway-bootstrap] seeded persona: ${join(result.workspacePath, "AGENTS.md")}`);
+  }
+  for (const pluginId of result.installedPlugins) {
+    console.log(`[railway-bootstrap] installed plugin: ${pluginId}`);
+  }
+  for (const skillName of result.installedSkills) {
+    console.log(`[railway-bootstrap] installed skill: ${skillName}`);
   }
 }

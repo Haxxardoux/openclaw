@@ -1,6 +1,7 @@
 import { normalizeProviderId } from "../agents/provider-id.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
+import { resolveRuntimePluginRegistry } from "./loader.js";
 import { resolveProviderConfigApiOwnerHint } from "./provider-config-owner.js";
 import { isPluginProvidersLoadInFlight, resolvePluginProviders } from "./providers.runtime.js";
 import { getActivePluginRegistryWorkspaceDirFromState } from "./runtime-state.js";
@@ -30,6 +31,36 @@ function matchesProviderId(provider: ProviderPlugin, providerId: string): boolea
 function matchesProviderLiteralId(provider: ProviderPlugin, providerId: string): boolean {
   const normalized = normalizeLowercaseStringOrEmpty(providerId);
   return !!normalized && normalizeLowercaseStringOrEmpty(provider.id) === normalized;
+}
+
+function resolveActiveRuntimeProviderPlugin(params: {
+  provider: string;
+  config?: OpenClawConfig;
+}): ProviderPlugin | undefined {
+  const apiOwnerHint = resolveProviderConfigApiOwnerHint({
+    provider: params.provider,
+    config: params.config,
+  });
+  const activeRegistry = resolveRuntimePluginRegistry();
+  if (!activeRegistry) {
+    return undefined;
+  }
+  for (const entry of activeRegistry.providers) {
+    const plugin = Object.assign({}, entry.provider, { pluginId: entry.pluginId });
+    if (apiOwnerHint) {
+      if (
+        matchesProviderLiteralId(plugin, params.provider) ||
+        matchesProviderId(plugin, apiOwnerHint)
+      ) {
+        return plugin;
+      }
+      continue;
+    }
+    if (matchesProviderId(plugin, params.provider)) {
+      return plugin;
+    }
+  }
+  return undefined;
 }
 
 export function resolveProviderPluginsForHooks(params: {
@@ -84,6 +115,13 @@ export function resolveProviderRuntimePlugin(params: {
   bundledProviderVitestCompat?: boolean;
   installBundledRuntimeDeps?: boolean;
 }): ProviderPlugin | undefined {
+  const activeProvider = resolveActiveRuntimeProviderPlugin({
+    provider: params.provider,
+    config: params.config,
+  });
+  if (activeProvider) {
+    return activeProvider;
+  }
   const apiOwnerHint = resolveProviderConfigApiOwnerHint({
     provider: params.provider,
     config: params.config,

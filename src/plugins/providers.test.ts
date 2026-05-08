@@ -1546,4 +1546,45 @@ describe("resolvePluginProviders", () => {
       }),
     );
   });
+
+  it("reuses the active runtime registry for explicit provider refs before scoped fallback", () => {
+    setManifestPlugins([
+      createManifestProviderPlugin({
+        id: "openai",
+        providerIds: ["openai", "openai-codex"],
+      }),
+    ]);
+    const activeRegistry = createEmptyPluginRegistry();
+    activeRegistry.providers.push({
+      pluginId: "openai",
+      provider: {
+        id: "openai-codex",
+        label: "OpenAI Codex",
+        auth: [],
+      },
+      source: "bundled",
+    });
+    resolveRuntimePluginRegistryMock.mockImplementation((params?: unknown) => {
+      if (params === undefined) {
+        return activeRegistry;
+      }
+      return createEmptyPluginRegistry();
+    });
+
+    const providers = resolvePluginProviders({
+      config: {},
+      providerRefs: ["openai-codex"],
+      bundledProviderAllowlistCompat: true,
+    });
+
+    expectResolvedProviders(providers, [
+      { id: "openai-codex", label: "OpenAI Codex", auth: [], pluginId: "openai" },
+    ]);
+    expect(resolveRuntimePluginRegistryMock).toHaveBeenCalledWith();
+    expect(resolveRuntimePluginRegistryMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        onlyPluginIds: ["openai"],
+      }),
+    );
+  });
 });
